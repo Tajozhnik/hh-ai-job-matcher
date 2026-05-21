@@ -1,0 +1,46 @@
+# HH AI Job Matcher — example configuration
+# Copy this file to config.yaml and fill in your real values:
+#   copy config.example.yaml config.yaml
+#
+# IMPORTANT: never commit config.yaml or .env to Git.
+# The real DeepSeek API key must be passed via the DEEPSEEK_API_KEY
+# environment variable, not written directly into this file.
+
+deepseek:
+  api_key: "${DEEPSEEK_API_KEY}"
+  base_url: "https://api.deepseek.com"
+  model: "deepseek-chat"
+
+search:
+  url: "https://hh.ru/search/vacancy?text=python+стажёр&experience=noExperience&area=1"
+  max_pages: 30
+  delay_between_pages: [4, 8]
+  delay_between_vacancy: [3, 6]
+  headless: false
+
+proxy:
+  enabled: false
+  url: ""
+
+profile:
+  name: "Имя"
+  summary: |
+    Краткое описание профиля кандидата — образование, опыт, технологии.
+  skills:
+    - python
+    - fastapi
+    - sql
+  pet_projects:
+    - "Пример пет-проекта"
+  hard_no:
+    - "senior/middle без стажёрского формата"
+    - "опыт от 3 лет строго"
+  min_salary_rub: 40000
+  location_preference:
+    - "remote"
+    - "moscow"
+
+analysis:
+  batch_size: 20
+  min_fit_score: 0.70
+  output: "results/matches.json"
