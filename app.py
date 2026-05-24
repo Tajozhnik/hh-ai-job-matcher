@@ -87,6 +87,14 @@ def clear_caches() -> None:
 
 def _run_cli(stage: str) -> tuple[int, str, str]:
     """Run main.py --only stage as a subprocess and return (returncode, stdout, stderr)."""
+    import os
+
+    env = os.environ.copy()
+    # Force UTF-8 in the child process so Rich doesn't crash on Cyrillic output
+    # under the default Windows cp1251 console encoding.
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+
     process = subprocess.run(
         [sys.executable, str(BASE_DIR / "main.py"), "--only", stage],
         cwd=BASE_DIR,
@@ -94,6 +102,7 @@ def _run_cli(stage: str) -> tuple[int, str, str]:
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=env,
     )
     return process.returncode, process.stdout, process.stderr
 

@@ -3,8 +3,21 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Any
+
+# On Windows, the default console encoding is cp1251, which crashes Rich the
+# moment it tries to print certain Cyrillic characters (e.g. combining breve
+# U+0306). Force UTF-8 on stdout/stderr before importing anything that prints.
+for stream_name in ("stdout", "stderr"):
+    stream = getattr(sys, stream_name, None)
+    reconfigure = getattr(stream, "reconfigure", None)
+    if callable(reconfigure):
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 import analyzer
 import database
