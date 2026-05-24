@@ -108,7 +108,14 @@ python main.py --only purge-html
 Помимо CLI есть веб-интерфейс на Streamlit — карточки вакансий, графики распределения, фильтры по треку и рекомендации, кнопки для запуска стадий пайплайна.
 
 ```powershell
+.\.venv\Scripts\Activate.ps1
 streamlit run app.py
+```
+
+Важно: запускай через venv, иначе Streamlit возьмёт системный Python и упадёт с `ModuleNotFoundError: No module named 'plotly'`. Проверка — в начале строки терминала должно быть `(.venv)`. Альтернатива без активации:
+
+```powershell
+.\.venv\Scripts\streamlit.exe run app.py
 ```
 
 UI откроется на http://localhost:8501 и читает ту же SQLite-базу, что и CLI. Кнопки в сайдбаре запускают `scrape / analyze / reanalyze / report / purge-html` через тот же `main.py`.
