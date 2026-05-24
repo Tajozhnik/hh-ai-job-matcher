@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -7,7 +8,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterable, Literal
 
 import database
 
@@ -27,55 +28,101 @@ except Exception:  # pragma: no cover - keeps module importable before install
 SYSTEM_PROMPT = """
 Ты строгий анализатор соответствия вакансии hh.ru профилю кандидата-джуна.
 Кандидат — студент 3 курса РТУ МИРЭА без большого коммерческого опыта, но с
-сильными пет-проектами и хакатонами. Считай пет-проекты полноценным релевантным
-опытом, особенно для Python backend, AI automation, Telegram-ботов, API, LLM и RAG.
+сильными пет-проектами, статьями на Хабре, hackathon и shipped-приложением в
+RuStore. Считай пет-проекты полноценным релевантным опытом, особенно для Python
+backend, AI automation, Telegram-ботов, API, LLM, RAG и автоматизаций.
 
 Верни СТРОГО JSON без Markdown, комментариев и текста вокруг объекта.
 Формат ответа НЕ МЕНЯТЬ:
 {
-  "fit_score": float 0..1,
-  "my_fit_for_them": float 0..1,
-  "their_fit_for_me": float 0..1,
-  "reasons": ["конкретные причины"],
-  "red_flags": ["конкретные риски"],
+  "my_fit_for_them": 0..1,
+  "their_fit_for_me": 0..1,
+  "fit_score": 0..1,
+  "track": "backend" | "ai_automation" | "telegram_bot" | "data_analytics" | "ml" | "qa" | "devops" | "fullstack" | "mobile" | "other",
+  "reasons": ["конкретные короткие причины"],
+  "red_flags": ["конкретные короткие риски"],
   "recommendation": "apply" | "maybe" | "skip"
 }
 
-Правила оценки:
-- Не отсеивай автоматически вакансии с требованием "опыт 1-2 года": джун со
-  strong pet projects может подходить.
-- Добавляй в reasons junior-friendly признаки: "стажировка", "обучение",
-  "наставник", "ментор", "без опыта", "будем учить", "intern", "junior",
-  "graduate", развитие, курсы, менторство, готовность команды растить специалиста.
-- Критичные red flags для джуна: "опыт от 3 лет строго" или "3 года" как жесткий
-  коммерческий must-have, "самостоятельно с первого дня", "без обучения",
-  "сразу в бой без ментора", Senior/Middle без упоминания junior/intern,
-  основной стек не Python (Java/C++/PHP/1C), чистый Data Science без engineering
-  задач, зарплата ниже 40 000 RUB для стажировки или явно "до 30к".
+ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА (нарушать нельзя):
 
-my_fit_for_them оценивает, насколько кандидат подходит работодателю:
-- требуемые скиллы есть в skills или pet_projects хотя бы на уровне pet/учебной практики;
-- опыт не требуется или указан 1-2 года, что можно частично закрыть пет-проектами;
-- нет жестких must-have, которых у кандидата совсем нет, например Go 5 лет.
+1. fit_score = min(my_fit_for_them, their_fit_for_me). Никаких "общих ощущений".
+   Если my_fit_for_them = 0.4, fit_score не может быть 0.85.
 
-their_fit_for_me оценивает, насколько вакансия подходит кандидату:
-- зарплата >= 40 000 RUB или не указана, но не ниже минимума;
-- локация remote/moscow/hybrid;
-- задачи связаны с Python/backend/AI/ботами/API/LLM/RAG;
-- нет hard_no из профиля;
-- есть обучение, наставник/ментор или другие junior-friendly признаки.
+2. recommendation вычисляется по fit_score:
+   - fit_score >= 0.75 -> "apply"
+   - 0.55 <= fit_score < 0.75 -> "maybe"
+   - fit_score < 0.55 -> "skip"
+   Никаких "apply при fit_score 0.4".
+
+3. Каждое значение my/their_fit_for_me должно ЯВНО следовать из текста вакансии,
+   не додумывать. Если зарплата не указана — это умеренный red flag, а не плюс.
+
+4. Различай разные оси:
+   - my_fit_for_them: насколько кандидат закрывает требования вакансии
+     (стек, опыт, грейд). Если в must-have указан стек, который не Python
+     (Java/C++/PHP/1C/Go/.NET/C#/Kotlin как ОСНОВНОЙ), my_fit_for_them <= 0.25.
+     Если требуют 3+ года коммерческого опыта строго — my_fit_for_them <= 0.4.
+     Если стек Python/AI/automation совпадает и есть junior/intern формат —
+     my_fit_for_them >= 0.7.
+   - their_fit_for_me: насколько вакансия подходит кандидату.
+     hard_no из профиля -> their_fit_for_me <= 0.3.
+     Зарплата ниже min_salary_rub строго -> their_fit_for_me <= 0.4.
+     Локация не из location_preference и не remote -> их_fit_for_me <= 0.5.
+     Backend/AI/automation/Telegram-боты/LLM API -> their_fit_for_me >= 0.7.
+     Чистый QA/Аналитика/DevOps/Frontend без Python-составляющей ->
+     their_fit_for_me <= 0.6 (это не его трек).
+
+5. track определяется по основному содержанию вакансии. Если вакансия "стажёр
+   аналитик" — track = "data_analytics", даже если просят Python и SQL.
+   Если "стажёр QA с автотестами" — track = "qa". Backend/AI/automation —
+   приоритетные треки кандидата.
+
+6. reasons и red_flags — короткие фразы, не предложения по 30 слов.
+   reasons должны указывать конкретные факты из вакансии, а не домыслы.
+
+7. Junior-friendly признаки усиливают my_fit_for_them: "стажировка",
+   "обучение", "наставник", "ментор", "без опыта", "intern", "junior",
+   "graduate", "будем учить".
+   Hostile признаки снижают my_fit_for_them: "опыт от 3 лет строго",
+   "самостоятельно с первого дня без ментора", "сразу в бой без обучения".
 """.strip()
 
 RECOMMENDATIONS = {"apply", "maybe", "skip"}
+TRACKS = {
+    "backend",
+    "ai_automation",
+    "telegram_bot",
+    "data_analytics",
+    "ml",
+    "qa",
+    "devops",
+    "fullstack",
+    "mobile",
+    "other",
+}
 ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+DESCRIPTION_LIMIT = 6000  # ~1.5k tokens; enough to capture stack and conditions
+
+# Regex patterns used by the deterministic pre-filter to skip vacancies that
+# obviously do not match the candidate before paying for an LLM call.
+HARD_SKIP_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("Основной стек 1С", re.compile(r"\b1[cс]\b|\b1c-разработчик|программист 1[cс]", re.IGNORECASE)),
+    ("Основной стек Java", re.compile(r"java[- ]разработчик|\bjava\s+(senior|middle)\b|опыт.*java\s+от\s+3", re.IGNORECASE)),
+    ("Основной стек PHP", re.compile(r"php[- ]разработчик|\bphp\s+(senior|middle)\b", re.IGNORECASE)),
+    ("Основной стек C\\+\\+", re.compile(r"c\+\+\s*-?\s*разработчик|разработчик\s*c\+\+", re.IGNORECASE)),
+    ("Senior/Lead grade", re.compile(r"\b(senior|lead|teamlead|тимлид|главный\s+разработчик)\b", re.IGNORECASE)),
+)
+HARD_SKIP_FALLBACK_REASON = "Несоответствие стеку/грейду по основному тексту вакансии"
 
 
 if PYDANTIC_AVAILABLE:
 
     class AnalysisResult(BaseModel):
-        fit_score: float = Field(ge=0, le=1)  # type: ignore[misc]
         my_fit_for_them: float = Field(ge=0, le=1)  # type: ignore[misc]
         their_fit_for_me: float = Field(ge=0, le=1)  # type: ignore[misc]
+        fit_score: float = Field(ge=0, le=1)  # type: ignore[misc]
+        track: str = "other"
         reasons: list[str]
         red_flags: list[str]
         recommendation: Literal["apply", "maybe", "skip"]
@@ -84,9 +131,10 @@ else:
 
     @dataclass
     class AnalysisResult:  # type: ignore[no-redef]
-        fit_score: float
         my_fit_for_them: float
         their_fit_for_me: float
+        fit_score: float
+        track: str
         reasons: list[str]
         red_flags: list[str]
         recommendation: str
@@ -113,6 +161,7 @@ def _coerce_score(value: Any) -> float:
 
 
 def _normalize_score(value: Any) -> float:
+    """Accept either 0..1 floats or legacy 0..100 ints stored in DB."""
     try:
         score = float(value)
     except (TypeError, ValueError):
@@ -122,12 +171,34 @@ def _normalize_score(value: Any) -> float:
     return max(0.0, min(score, 1.0))
 
 
-def _storage_score(value: Any) -> int:
-    score = _normalize_score(value)
-    return int(round(score * 100))
+def _recommendation_from_score(score: float) -> str:
+    if score >= 0.75:
+        return "apply"
+    if score >= 0.55:
+        return "maybe"
+    return "skip"
+
+
+def _enforce_score_invariants(data: dict[str, Any]) -> dict[str, Any]:
+    """Make sure scores follow the rules from the prompt even if LLM cheats."""
+    my = _normalize_score(data.get("my_fit_for_them", 0))
+    their = _normalize_score(data.get("their_fit_for_me", 0))
+    fit = _normalize_score(data.get("fit_score", 0))
+    expected_fit = min(my, their)
+    if abs(fit - expected_fit) > 0.05:
+        fit = expected_fit
+    data["my_fit_for_them"] = my
+    data["their_fit_for_me"] = their
+    data["fit_score"] = fit
+    data["recommendation"] = _recommendation_from_score(fit)
+    track = str(data.get("track", "other")).strip().lower() or "other"
+    data["track"] = track if track in TRACKS else "other"
+    return data
 
 
 def validate_analysis_result(data: dict[str, Any]) -> AnalysisResult:
+    data = dict(data)
+    data = _enforce_score_invariants(data)
     if PYDANTIC_AVAILABLE:
         if hasattr(AnalysisResult, "model_validate"):
             return AnalysisResult.model_validate(data)  # type: ignore[attr-defined]
@@ -137,9 +208,10 @@ def validate_analysis_result(data: dict[str, Any]) -> AnalysisResult:
     if recommendation not in RECOMMENDATIONS:
         raise ValueError("recommendation must be apply, maybe, or skip")
     return AnalysisResult(
-        fit_score=_coerce_score(data["fit_score"]),
         my_fit_for_them=_coerce_score(data["my_fit_for_them"]),
         their_fit_for_me=_coerce_score(data["their_fit_for_me"]),
+        fit_score=_coerce_score(data["fit_score"]),
+        track=str(data.get("track", "other")),
         reasons=_coerce_string_list(data.get("reasons")),
         red_flags=_coerce_string_list(data.get("red_flags")),
         recommendation=recommendation,
@@ -180,6 +252,15 @@ def load_config(path: str = "config.yaml") -> dict[str, Any]:
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("PyYAML is required: pip install -r requirements.txt") from exc
 
+    # Auto-load .env from the project root if python-dotenv is available so users
+    # don't have to export DEEPSEEK_API_KEY manually each session.
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(BASE_DIR / ".env", override=False)
+    except ImportError:  # pragma: no cover - optional dependency
+        pass
+
     try:
         with open(path, "r", encoding="utf-8") as file:
             config = yaml.safe_load(file) or {}
@@ -196,6 +277,71 @@ def _format_list(items: list[Any] | None) -> str:
     if not items:
         return "- не указано"
     return "\n".join(f"- {item}" for item in items)
+
+
+def _truncate_description(description: Any, limit: int = DESCRIPTION_LIMIT) -> str:
+    if not description:
+        return "не указано"
+    text = str(description).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0] + " …[обрезано]"
+
+
+def parse_salary_min_rub(salary: Any) -> int | None:
+    """Best-effort extraction of the lower bound of the salary in RUB.
+
+    Handles HH formats like "от 40 000 ₽ за месяц", "50 000 ₽", "120000 руб.".
+    Returns None if the salary is missing or unparsable.
+    """
+    if not salary:
+        return None
+    text = str(salary).lower().replace("\xa0", " ")
+    if any(token in text for token in ("usd", "$", "eur", "€", "kzt", "тенге", "byn")):
+        return None  # non-RUB salaries are out of scope for the candidate
+    numbers = [int(value.replace(" ", "")) for value in re.findall(r"\d[\d\s]{2,}", text)]
+    if not numbers:
+        return None
+    if "от" in text:
+        return numbers[0]
+    if "до" in text and len(numbers) >= 1:
+        return numbers[0]  # "до 100000" — use the visible bound as proxy
+    return numbers[0]
+
+
+def deterministic_skip(vacancy: dict[str, Any], profile: dict[str, Any]) -> AnalysisResult | None:
+    """Cheap pre-filter that rejects obviously unsuitable vacancies without
+    hitting the LLM. Returns None if the vacancy should be sent to LLM.
+    """
+    title = str(vacancy.get("title") or "")
+    description = str(vacancy.get("description") or "")
+    haystack = f"{title}\n{description}"
+
+    red_flags: list[str] = []
+    for flag, pattern in HARD_SKIP_PATTERNS:
+        if pattern.search(haystack):
+            red_flags.append(flag)
+
+    min_salary = profile.get("min_salary_rub")
+    if min_salary:
+        salary_min = parse_salary_min_rub(vacancy.get("salary"))
+        if salary_min is not None and salary_min < int(min_salary) * 0.6:
+            red_flags.append(f"Зарплата {salary_min} ниже комфортного порога")
+
+    if not red_flags:
+        return None
+
+    return validate_analysis_result(
+        {
+            "my_fit_for_them": 0.1,
+            "their_fit_for_me": 0.1,
+            "fit_score": 0.1,
+            "track": "other",
+            "reasons": [],
+            "red_flags": red_flags or [HARD_SKIP_FALLBACK_REASON],
+            "recommendation": "skip",
+        }
+    )
 
 
 def _build_user_message(profile: dict[str, Any], vacancy: dict[str, Any]) -> str:
@@ -231,7 +377,7 @@ skills:
 {_format_list(vacancy.get("skills", []))}
 
 description:
-{vacancy.get("description", "не указано")}
+{_truncate_description(vacancy.get("description"))}
 """.strip()
 
 
@@ -246,17 +392,27 @@ async def analyze_vacancy(
     if isinstance(config, str):
         config = load_config(config)
 
-    deepseek = config.get("deepseek", {})
     profile = config.get("profile", {})
+
+    skip_result = deterministic_skip(vacancy, profile)
+    if skip_result is not None:
+        return skip_result
+
+    deepseek = config.get("deepseek", {})
     api_key = deepseek.get("api_key")
     if not api_key:
         raise RuntimeError(
-            "DeepSeek API key is empty. Set the environment variable used in config.yaml."
+            "DeepSeek API key is empty. Set the DEEPSEEK_API_KEY environment variable."
         )
 
     try:
         import httpx
-        from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+        from tenacity import (
+            retry,
+            retry_if_exception_type,
+            stop_after_attempt,
+            wait_exponential,
+        )
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("Install dependencies first: pip install -r requirements.txt") from exc
 
@@ -270,7 +426,7 @@ async def analyze_vacancy(
             {"role": "user", "content": build_user_prompt(profile, vacancy)},
         ],
         "response_format": {"type": "json_object"},
-        "temperature": 0.1,
+        "temperature": 0.0,
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -296,7 +452,31 @@ async def analyze_vacancy(
     return await call_deepseek()
 
 
+async def analyze_many(
+    vacancies: Iterable[dict[str, Any]],
+    config: dict[str, Any],
+    concurrency: int = 4,
+) -> list[tuple[dict[str, Any], AnalysisResult | Exception]]:
+    """Run analyze_vacancy concurrently with a semaphore."""
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+
+    async def _runner(vacancy: dict[str, Any]) -> tuple[dict[str, Any], AnalysisResult | Exception]:
+        async with semaphore:
+            try:
+                result = await analyze_vacancy(vacancy, config)
+                return vacancy, result
+            except Exception as exc:  # noqa: BLE001 - returned to caller
+                return vacancy, exc
+
+    return await asyncio.gather(*(_runner(vac) for vac in vacancies))
+
+
 def analysis_to_storage_dict(result: AnalysisResult | dict[str, Any]) -> dict[str, Any]:
+    """Return a flat dict suitable for database.save_analysis.
+
+    Stores fit_score as int 0..100 (existing schema) and the two component
+    scores as floats 0..1.
+    """
     if hasattr(result, "model_dump"):
         data = result.model_dump()  # type: ignore[union-attr]
     elif hasattr(result, "dict"):
@@ -305,7 +485,10 @@ def analysis_to_storage_dict(result: AnalysisResult | dict[str, Any]) -> dict[st
         data = dict(result)
 
     stored = dict(data)
-    stored["fit_score"] = _storage_score(data.get("fit_score", 0))
+    stored["fit_score"] = int(round(_normalize_score(data.get("fit_score", 0)) * 100))
+    stored["my_fit_for_them"] = round(_normalize_score(data.get("my_fit_for_them", 0)), 3)
+    stored["their_fit_for_me"] = round(_normalize_score(data.get("their_fit_for_me", 0)), 3)
+    stored["track"] = str(data.get("track", "other"))
     return stored
 
 
@@ -317,6 +500,7 @@ def _display_match(match: dict[str, Any]) -> dict[str, Any]:
     data["reasons"] = _coerce_string_list(match.get("reasons", []))
     data["red_flags"] = _coerce_string_list(match.get("red_flags", []))
     data["recommendation"] = str(match.get("recommendation", "skip"))
+    data["track"] = str(match.get("track") or "other")
     return data
 
 
@@ -324,9 +508,10 @@ def _format_vacancy_block(vacancy: dict[str, Any]) -> str:
     reasons = _format_list(vacancy.get("reasons", []))
     red_flags = _format_list(vacancy.get("red_flags", []))
     red_flags_block = f"\n**Red flags:**\n{red_flags}\n" if vacancy.get("red_flags") else ""
+    track = vacancy.get("track") or "other"
     return f"""
 ## [{vacancy.get("title") or "Без названия"}]({vacancy.get("url") or ""})
-**Компания:** {vacancy.get("company") or "не указана"} · **ЗП:** {vacancy.get("salary") or "не указана"} · **Локация:** {vacancy.get("location") or "не указана"}
+**Компания:** {vacancy.get("company") or "не указана"} · **ЗП:** {vacancy.get("salary") or "не указана"} · **Локация:** {vacancy.get("location") or "не указана"} · **Трек:** {track}
 **Scores:** fit={vacancy["fit_score"]:.2f}, я→них={vacancy["my_fit_for_them"]:.2f}, они→я={vacancy["their_fit_for_me"]:.2f}
 **Рекомендация:** {vacancy["recommendation"]}
 
@@ -374,6 +559,8 @@ def build_report_markdown(
         else:
             rejected.append(match)
 
+    track_counts = Counter(match.get("track", "other") for match in normalized)
+
     parts = [
         f"# 📊 HH.ru отчёт — {current_date.isoformat()}",
         "## Общая статистика",
@@ -381,8 +568,13 @@ def build_report_markdown(
         f"- Проанализировано: {stats.get('analyzed', len(normalized))}",
         f"- Прошло минимальный порог ({min_fit_score}): {len(passed)}",
         f"- Средний fit_score среди прошедших порог: {average_passed:.2f}",
-        "---",
     ]
+    if track_counts:
+        track_lines = ", ".join(
+            f"{track}={count}" for track, count in track_counts.most_common()
+        )
+        parts.append(f"- Распределение по трекам: {track_lines}")
+    parts.append("---")
 
     sections = [
         ("## 🟢 Точно подавайся", green),
@@ -393,7 +585,13 @@ def build_report_markdown(
         if not vacancies:
             continue
         parts.append(title)
-        parts.extend(_format_vacancy_block(vacancy) for vacancy in vacancies)
+        # Within each section group by track to make scanning easier.
+        vacancies_by_track: dict[str, list[dict[str, Any]]] = {}
+        for vacancy in vacancies:
+            vacancies_by_track.setdefault(vacancy.get("track", "other"), []).append(vacancy)
+        for track in sorted(vacancies_by_track):
+            parts.append(f"### Трек: {track}")
+            parts.extend(_format_vacancy_block(vacancy) for vacancy in vacancies_by_track[track])
 
     red_flag_counts = Counter(
         flag for vacancy in rejected for flag in vacancy.get("red_flags", [])

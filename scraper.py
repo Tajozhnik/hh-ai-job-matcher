@@ -363,6 +363,7 @@ async def scrape_vacancy_detail(
 ) -> dict[str, Any]:
     page = await context.new_page()
     await stealth_async(page)
+    save_raw_html = bool(config.get("search", {}).get("save_raw_html", False))
     try:
         await goto_with_http_handling(page, item["url"], throttle_state)
         await pause_for_captcha(page, config)
@@ -401,7 +402,7 @@ async def scrape_vacancy_detail(
                 "[data-qa='vacancy-view-published-at']"
             )
         )
-        raw_html = await page.content()
+        raw_html = await page.content() if save_raw_html else None
         vacancy_id = item["id"]
 
         return {
@@ -443,7 +444,15 @@ async def scrape(
 
     search = config.get("search", {})
     proxy = config.get("proxy", {})
-    search_url = search["url"]
+    # Support both single `url` and a list `urls` for multi-track scraping.
+    search_urls: list[str] = []
+    if search.get("urls"):
+        search_urls = [str(u) for u in search["urls"] if u]
+    elif search.get("url"):
+        search_urls = [str(search["url"])]
+    if not search_urls:
+        raise RuntimeError("config.search.url or config.search.urls must be set")
+
     max_pages = int(search.get("max_pages", 1))
     page_delay = parse_delay(search.get("delay_between_pages"), (2, 7))
     vacancy_delay = parse_delay(search.get("delay_between_vacancy"), (2, 7))
@@ -466,40 +475,66 @@ async def scrape(
         await stealth_async(page)
 
         try:
-            for page_number in range(max_pages):
-                page_url = with_page_param(search_url, page_number)
-                console.print(f"[cyan]Open search page:[/cyan] {page_url}")
-                await goto_with_http_handling(page, page_url, throttle_state)
-                await pause_for_captcha(page, config)
-                await human_mouse_movements(page)
-                vacancies = await collect_vacancy_links(page)
-                console.print(
-                    f"[cyan]Found {len(vacancies)} vacancy links on page {page_number}.[/cyan]"
-                )
-
-                for item in vacancies:
-                    vacancy_id = item["id"]
-                    if database.vacancy_exists(vacancy_id, db_path):
-                        console.print(f"[dim]Skip existing vacancy {vacancy_id}[/dim]")
-                        continue
-
-                    await human_random_scroll(page)
+            for search_url in search_urls:
+                console.print(f"[magenta]=== Scraping query: {search_url}[/magenta]")
+                for page_number in range(max_pages):
+                    page_url = with_page_param(search_url, page_number)
+                    console.print(f"[cyan]Open search page:[/cyan] {page_url}")
+                    await goto_with_http_handling(page, page_url, throttle_state)
+                    await pause_for_captcha(page, config)
                     await human_mouse_movements(page)
-                    vacancy = await scrape_vacancy_detail(
-                        context,
-                        item,
-                        config,
-                        stealth_async,
-                        throttle_state,
-                    )
-                    database.upsert_vacancy(vacancy, db_path)
-                    scraped_count += 1
+                    vacancies = await collect_vacancy_links(page)
                     console.print(
-                        f"[green]Saved vacancy {vacancy['id']}:[/green] {vacancy['title']}"
+                        f"[cyan]Found {len(vacancies)} vacancy links "
+                        f"on page {page_number}.[/cyan]"
                     )
-                    await random_delay(vacancy_delay)
 
-                await random_delay(page_delay)
+                    if not vacancies:
+                        # Empty page is a hint that we have walked past the
+                        # last page of results for this query — move on.
+                        break
+
+                    for item in vacancies:
+                        vacancy_id = item["id"]
+                        if database.vacancy_exists(vacancy_id, db_path):
+                            console.print(f"[dim]Skip existing vacancy {vacancy_id}[/dim]")
+                            continue
+
+                        await human_random_scroll(page)
+                        await human_mouse_movements(page)
+                        vacancy = await scrape_vacancy_detail(
+                            context,
+                            item,
+                            config,
+                            stealth_async,
+                            throttle_state,
+                        )
+
+                        # Cross-id deduplication: HH frequently reposts the same
+                        # job under different ids. If we already have one with
+                        # the same title+company, keep the original analysis
+                        # and skip the duplicate.
+                        duplicate_of = database.find_duplicate_vacancy_id(
+                            vacancy.get("title"),
+                            vacancy.get("company"),
+                            db_path,
+                        )
+                        if duplicate_of and duplicate_of != vacancy["id"]:
+                            console.print(
+                                f"[dim]Skip duplicate of {duplicate_of}: "
+                                f"{vacancy['title']} @ {vacancy.get('company')}[/dim]"
+                            )
+                            continue
+
+                        database.upsert_vacancy(vacancy, db_path)
+                        scraped_count += 1
+                        console.print(
+                            f"[green]Saved vacancy {vacancy['id']}:[/green] "
+                            f"{vacancy['title']}"
+                        )
+                        await random_delay(vacancy_delay)
+
+                    await random_delay(page_delay)
         finally:
             await context.close()
             await browser.close()

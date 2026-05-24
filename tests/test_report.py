@@ -19,6 +19,7 @@ class ReportTests(unittest.TestCase):
                 "fit_score": 0.82,
                 "my_fit_for_them": 0.78,
                 "their_fit_for_me": 0.88,
+                "track": "backend",
                 "reasons": ["стажировка", "python"],
                 "red_flags": [],
                 "recommendation": "apply",
@@ -33,6 +34,7 @@ class ReportTests(unittest.TestCase):
                 "fit_score": 0.63,
                 "my_fit_for_them": 0.58,
                 "their_fit_for_me": 0.72,
+                "track": "ai_automation",
                 "reasons": ["LLM API"],
                 "red_flags": ["неясная зарплата"],
                 "recommendation": "maybe",
@@ -47,6 +49,7 @@ class ReportTests(unittest.TestCase):
                 "fit_score": 0.46,
                 "my_fit_for_them": 0.35,
                 "their_fit_for_me": 0.82,
+                "track": "ai_automation",
                 "reasons": ["интересные AI задачи"],
                 "red_flags": ["много production-опыта"],
                 "recommendation": "maybe",
@@ -61,6 +64,7 @@ class ReportTests(unittest.TestCase):
                 "fit_score": 0.21,
                 "my_fit_for_them": 0.18,
                 "their_fit_for_me": 0.31,
+                "track": "backend",
                 "reasons": [],
                 "red_flags": ["опыт от 3 лет строго", "офис 5/2"],
                 "recommendation": "skip",
@@ -75,6 +79,7 @@ class ReportTests(unittest.TestCase):
                 "fit_score": 0.12,
                 "my_fit_for_them": 0.1,
                 "their_fit_for_me": 0.2,
+                "track": "other",
                 "reasons": [],
                 "red_flags": ["основной стек не Python", "офис 5/2"],
                 "recommendation": "skip",
@@ -97,7 +102,9 @@ class ReportTests(unittest.TestCase):
 
         self.assertIn("# 📊 HH.ru отчёт", content)
         self.assertIn("## Общая статистика", content)
+        self.assertIn("Распределение по трекам", content)
         self.assertIn("## 🟢 Точно подавайся", content)
+        self.assertIn("### Трек: backend", content)
         self.assertIn("## 🟡 Подумай", content)
         self.assertIn("## 🔴 Интересно, но не мой уровень", content)
         self.assertIn("## ⚫ Отсеяно", content)
