@@ -12,11 +12,20 @@ deepseek:
   model: "deepseek-chat"
 
 search:
-  url: "https://hh.ru/search/vacancy?text=python+стажёр&experience=noExperience&area=1"
-  max_pages: 30
+  # Use either a single `url` or a list `urls` for multi-track scraping.
+  # Each URL is scraped sequentially; vacancies are deduplicated by id and by
+  # title+company across queries.
+  urls:
+    - "https://hh.ru/search/vacancy?text=python+стажёр&experience=noExperience&area=1"
+    - "https://hh.ru/search/vacancy?text=python+junior&experience=noExperience&area=1"
+    - "https://hh.ru/search/vacancy?text=AI+automation&experience=noExperience&area=1"
+    - "https://hh.ru/search/vacancy?text=telegram+bot+python&experience=noExperience&area=1"
+  max_pages: 10
   delay_between_pages: [4, 8]
   delay_between_vacancy: [3, 6]
   headless: false
+  # Set to true to keep full vacancy HTML in SQLite (debugging only — heavy).
+  save_raw_html: false
 
 proxy:
   enabled: false
@@ -42,5 +51,6 @@ profile:
 
 analysis:
   batch_size: 20
+  concurrency: 4
   min_fit_score: 0.70
   output: "results/matches.json"

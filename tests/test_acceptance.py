@@ -27,7 +27,14 @@ class AcceptanceTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--only", result.stdout)
-        self.assertIn("{scrape,analyze,export,report}", result.stdout)
+
+    def test_main_module_exposes_all_stages(self):
+        import main
+
+        for stage in (
+            "scrape", "analyze", "reanalyze", "export", "report", "stats", "purge-html",
+        ):
+            self.assertIn(stage, main.STAGES)
 
     def test_example_config_has_required_sections(self):
         config_path = PROJECT_ROOT / "config.example.yaml"
@@ -40,10 +47,13 @@ class AcceptanceTests(unittest.TestCase):
                 self.assertIn(section, config, f"Missing section: {section}")
 
         self.assertIn("api_key", config["deepseek"])
-        self.assertIn("url", config["search"])
+        # Either a single url or a list of urls is acceptable.
+        search = config["search"]
+        self.assertTrue("url" in search or "urls" in search)
         self.assertIn("skills", config["profile"])
         self.assertIn("pet_projects", config["profile"])
         self.assertIn("output", config["analysis"])
+        self.assertIn("concurrency", config["analysis"])
 
     def test_sensitive_files_are_ignored(self):
         gitignore_path = PROJECT_ROOT / ".gitignore"
